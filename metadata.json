@@ -1,0 +1,8 @@
+{
+  "name": "LIFEOS",
+  "description": "Your Life. Your People. Everything in Progress. A unified personal, family, and community Matter Management System.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
