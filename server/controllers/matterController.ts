@@ -89,7 +89,14 @@ export async function removeMatter(req: AuthRequest, res: Response) {
 
 export async function postMatterUpdate(req: AuthRequest, res: Response) {
   try {
-    const update = await addMatterUpdate(req.user!.id, req.params.id, req.body);
+    const body =
+      req.body && typeof req.body === 'object'
+        ? (req.body as { message?: string; updateType?: string })
+        : {};
+    const update = await addMatterUpdate(req.user!.id, req.params.id, {
+      message: body.message ?? '',
+      updateType: body.updateType,
+    });
     return res.status(201).json({ update });
   } catch (error) {
     return handleControllerError(res, error, 'Failed to add update.');

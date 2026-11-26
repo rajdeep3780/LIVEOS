@@ -387,7 +387,13 @@ export function SpaceDetailPage() {
                             </span>
                           )}
 
-                          {canManageMembers && !isSelf && m.role !== 'owner' && (
+                          {canManageMembers &&
+                            !isSelf &&
+                            (space.currentUserRole === 'owner'
+                              ? m.role !== 'owner' ||
+                                space.members.filter((member) => member.role === 'owner')
+                                  .length > 1
+                              : m.role === 'member') && (
                             <button
                               type="button"
                               onClick={() =>

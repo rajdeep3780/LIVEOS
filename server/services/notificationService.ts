@@ -1,11 +1,16 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, count, desc, eq, isNull, sql } from 'drizzle-orm';
 import { db } from '../../src/db/index.ts';
-import { matters, notifications, spaces } from '../../src/db/schema.ts';
+import {
+  matters,
+  notifications,
+  spaceMemberships,
+  spaces,
+} from '../../src/db/schema.ts';
 import { isValidUuid } from './spaceService.ts';
 
 export async function listNotifications(userId: string) {
   try {
-    const items = await db
+    const rows = await db
       .select({
         id: notifications.id,
         userId: notifications.userId,
@@ -13,6 +18,7 @@ export async function listNotifications(userId: string) {
         message: notifications.message,
         readAt: notifications.readAt,
         createdAt: notifications.createdAt,
+        hasSpaceAccess: sql<boolean>`(${spaceMemberships.id} IS NOT NULL)`,
         matterTitle: matters.title,
         matterStatus: matters.status,
         spaceName: spaces.name,
@@ -20,11 +26,35 @@ export async function listNotifications(userId: string) {
       .from(notifications)
       .leftJoin(matters, eq(notifications.matterId, matters.id))
       .leftJoin(spaces, eq(matters.spaceId, spaces.id))
+      .leftJoin(
+        spaceMemberships,
+        and(
+          eq(spaceMemberships.spaceId, matters.spaceId),
+          eq(spaceMemberships.userId, userId)
+        )
+      )
       .where(eq(notifications.userId, userId))
       .orderBy(desc(notifications.createdAt))
       .limit(50);
 
-    const unreadCount = items.filter((n) => n.readAt === null).length;
+    const items = rows.map((row) => ({
+      id: row.id,
+      userId: row.userId,
+      matterId: row.hasSpaceAccess ? row.matterId : null,
+      message: row.message,
+      readAt: row.readAt,
+      createdAt: row.createdAt,
+      matterTitle: row.hasSpaceAccess ? row.matterTitle : null,
+      matterStatus: row.hasSpaceAccess ? row.matterStatus : null,
+      spaceName: row.hasSpaceAccess ? row.spaceName : null,
+    }));
+
+    const [unreadRow] = await db
+      .select({ total: count() })
+      .from(notifications)
+      .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+
+    const unreadCount = Number(unreadRow?.total ?? 0);
 
     return {
       items,

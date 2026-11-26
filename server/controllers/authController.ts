@@ -1,10 +1,14 @@
 import type { Request, Response } from 'express';
-import { signSessionToken } from '../lib/auth-crypto.ts';
+import { signSessionToken, verifySessionToken } from '../lib/auth-crypto.ts';
 import {
   type AuthRequest,
   clearSessionCookie,
+  parseCookies,
+  SESSION_COOKIE_NAME,
   setSessionCookie,
+  verifyCookieMutationOrigin,
 } from '../middleware/auth.ts';
+import { revokeSessionToken } from '../services/sessionService.ts';
 import {
   loginWithPassword,
   registerWithPassword,
@@ -38,7 +42,7 @@ export async function register(req: Request, res: Response) {
 
     const user = await registerWithPassword(displayName, email, password);
     const token = signSessionToken(user.id);
-    setSessionCookie(res, token);
+    setSessionCookie(req, res, token);
 
     return res.status(201).json({ user, token });
   } catch (error) {
@@ -65,7 +69,7 @@ export async function login(req: Request, res: Response) {
     }
 
     const token = signSessionToken(user.id);
-    setSessionCookie(res, token);
+    setSessionCookie(req, res, token);
 
     return res.json({ user, token });
   } catch (error) {
@@ -73,9 +77,44 @@ export async function login(req: Request, res: Response) {
   }
 }
 
-export async function logout(_req: Request, res: Response) {
-  clearSessionCookie(res);
-  return res.json({ ok: true });
+export async function logout(req: Request, res: Response) {
+  try {
+    const authHeader = req.headers.authorization;
+    const bearerToken =
+      authHeader && authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
+        : '';
+    const bearerSession = bearerToken ? verifySessionToken(bearerToken) : null;
+
+    const cookies = parseCookies(req.headers.cookie);
+    const cookieToken = cookies[SESSION_COOKIE_NAME];
+    const cookieOriginValid = verifyCookieMutationOrigin(req);
+
+    if (cookieToken && !bearerSession && !cookieOriginValid) {
+      return res.status(403).json({ error: 'Forbidden: Cross-site request blocked.' });
+    }
+
+    const sessionsToRevoke = new Map<string, NonNullable<typeof bearerSession>>();
+    if (bearerSession) {
+      sessionsToRevoke.set(bearerSession.jti, bearerSession);
+    }
+    if (cookieToken && cookieOriginValid) {
+      const cookieSession = verifySessionToken(cookieToken);
+      if (cookieSession) {
+        sessionsToRevoke.set(cookieSession.jti, cookieSession);
+      }
+    }
+
+    for (const session of sessionsToRevoke.values()) {
+      await revokeSessionToken(session);
+    }
+
+    clearSessionCookie(req, res);
+    return res.json({ ok: true });
+  } catch (error) {
+    clearSessionCookie(req, res);
+    return handleControllerError(res, error, 'Unable to sign out.');
+  }
 }
 
 export async function me(req: AuthRequest, res: Response) {

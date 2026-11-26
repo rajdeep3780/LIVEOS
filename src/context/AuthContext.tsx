@@ -104,12 +104,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     try {
-      if (auth.currentUser) {
-        await signOut(auth);
-      }
-    } finally {
       await logoutUser();
-      setUser(null);
+    } catch {
+      // Backend revocation is best-effort; still sign out client state below
+    } finally {
+      try {
+        if (auth.currentUser) {
+          await signOut(auth);
+        }
+      } catch {
+        // Ensure React auth state always resets even if Firebase signOut fails
+      } finally {
+        setUser(null);
+      }
     }
   }, []);
 

@@ -1,5 +1,6 @@
 import { X } from 'lucide-react';
 import { type FormEvent, useEffect, useState } from 'react';
+import { useAuth } from '../../context/AuthContext.tsx';
 import { toDateInputValue } from '../../lib/date.ts';
 import { extractErrorMessage } from '../../services/api.ts';
 import {
@@ -12,6 +13,7 @@ import type {
   MatterPriority,
   MatterStatus,
   SpaceMember,
+  SpaceRole,
   SpaceSummary,
 } from '../../types/lifeos.ts';
 
@@ -52,6 +54,7 @@ export function MatterFormModal({
   onClose,
   onSaved,
 }: MatterFormModalProps) {
+  const { user } = useAuth();
   const isEditing = Boolean(initialMatter);
 
   const [spaces, setSpaces] = useState<SpaceSummary[]>([]);
@@ -59,6 +62,7 @@ export function MatterFormModal({
     initialMatter?.spaceId || defaultSpaceId || ''
   );
   const [members, setMembers] = useState<SpaceMember[]>([]);
+  const [spaceRole, setSpaceRole] = useState<SpaceRole>('member');
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -149,8 +153,10 @@ export function MatterFormModal({
       .then((detail) => {
         if (cancelled) return;
         setMembers(detail.members);
+        setSpaceRole(detail.currentUserRole);
         if (!initialMatter && !ownerId && detail.members.length > 0) {
-          setOwnerId(detail.members[0].userId);
+          const selfMember = detail.members.find((m) => m.userId === user?.id);
+          setOwnerId(selfMember?.userId || detail.members[0].userId);
         }
       })
       .catch(() => {
@@ -160,9 +166,14 @@ export function MatterFormModal({
     return () => {
       cancelled = true;
     };
-  }, [open, spaceId, initialMatter, ownerId]);
+  }, [open, spaceId, initialMatter, ownerId, user?.id]);
 
   if (!open) return null;
+
+  const isOwnerOrAdmin = spaceRole === 'owner' || spaceRole === 'admin';
+  const availableStatuses = isOwnerOrAdmin
+    ? STATUS_OPTIONS
+    : STATUS_OPTIONS.filter((s) => s !== 'Archived' || s === initialMatter?.status);
 
   const toggleParticipant = (uid: string) => {
     setParticipantIds((prev) =>
@@ -201,11 +212,11 @@ export function MatterFormModal({
         priority,
         ownerId: ownerId || null,
         participantIds,
-        waitingFor: waitingFor.trim() || null,
+        waitingFor: status === 'Waiting' ? waitingFor.trim() || null : null,
         nextAction: nextAction.trim() || null,
         nextActionAt: nextActionAt ? new Date(`${nextActionAt}T12:00:00`).toISOString() : null,
         dueAt: dueAt ? new Date(`${dueAt}T17:00:00`).toISOString() : null,
-        resolution: resolution.trim() || null,
+        resolution: status === 'Completed' ? resolution.trim() || null : null,
       };
 
       if (isEditing && initialMatter) {
@@ -355,10 +366,15 @@ export function MatterFormModal({
               <select
                 id="matter-status"
                 value={status}
+                disabled={
+                  isEditing &&
+                  initialMatter?.status === 'Archived' &&
+                  !isOwnerOrAdmin
+                }
                 onChange={(e) => setStatus(e.target.value as MatterStatus)}
-                className="w-full rounded-md border border-[#2B2E38] bg-[#0F1114] px-3 py-2.5 text-sm text-white focus:border-[#F97316] focus:outline-none"
+                className="w-full rounded-md border border-[#2B2E38] bg-[#0F1114] px-3 py-2.5 text-sm text-white focus:border-[#F97316] focus:outline-none disabled:opacity-60"
               >
-                {STATUS_OPTIONS.map((st) => (
+                {availableStatuses.map((st) => (
                   <option key={st} value={st}>
                     {st}
                   </option>
@@ -397,9 +413,11 @@ export function MatterFormModal({
               <select
                 id="matter-owner"
                 value={ownerId}
+                disabled={!isOwnerOrAdmin}
                 onChange={(e) => setOwnerId(e.target.value)}
-                className="w-full rounded-md border border-[#2B2E38] bg-[#0F1114] px-3 py-2.5 text-sm text-white focus:border-[#F97316] focus:outline-none"
+                className="w-full rounded-md border border-[#2B2E38] bg-[#0F1114] px-3 py-2.5 text-sm text-white focus:border-[#F97316] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
               >
+                {!ownerId && <option value="">Unassigned</option>}
                 {members.map((m) => (
                   <option key={m.userId} value={m.userId}>
                     {m.displayName}

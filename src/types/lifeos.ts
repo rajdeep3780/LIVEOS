@@ -99,8 +99,19 @@ export interface Matter {
   updateCount: number;
 }
 
+export interface MatterPermissions {
+  canEditDetails: boolean;
+  canChangeStatusPriority: boolean;
+  canChangeOwnership: boolean;
+  canManageParticipants: boolean;
+  canArchiveRestore: boolean;
+  canDelete: boolean;
+  canPostUpdate: boolean;
+}
+
 export interface MatterDetail extends Matter {
   currentUserRole: SpaceRole;
+  permissions?: MatterPermissions;
   updates: MatterUpdate[];
   spaceMembers: SpaceMember[];
 }

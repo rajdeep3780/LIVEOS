@@ -1,12 +1,15 @@
-import { and, desc, eq, inArray, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { db } from '../../src/db/index.ts';
 import {
+  matterParticipants,
   matters,
+  matterUpdates,
   notifications,
   spaceMemberships,
   spaces,
   users,
 } from '../../src/db/schema.ts';
+import type { DbClient } from './userService.ts';
 
 export const UUID_REGEX =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -21,10 +24,14 @@ export type SpaceRole = 'owner' | 'admin' | 'member';
 export const VALID_SPACE_TYPES: SpaceType[] = ['personal', 'family', 'community'];
 export const VALID_ROLES: SpaceRole[] = ['owner', 'admin', 'member'];
 
-export async function getMembership(userId: string, spaceId: string) {
+export async function getMembership(
+  userId: string,
+  spaceId: string,
+  txClient: DbClient = db
+) {
   if (!isValidUuid(spaceId)) return null;
   try {
-    const [membership] = await db
+    const [membership] = await txClient
       .select()
       .from(spaceMemberships)
       .where(
@@ -117,23 +124,25 @@ export async function createSpace(
   }
 
   try {
-    const [space] = await db
-      .insert(spaces)
-      .values({
-        name,
-        type,
-        description,
-        createdBy: userId,
-      })
-      .returning();
+    return await db.transaction(async (tx) => {
+      const [space] = await tx
+        .insert(spaces)
+        .values({
+          name,
+          type,
+          description,
+          createdBy: userId,
+        })
+        .returning();
 
-    await db.insert(spaceMemberships).values({
-      spaceId: space.id,
-      userId,
-      role: 'owner',
+      await tx.insert(spaceMemberships).values({
+        spaceId: space.id,
+        userId,
+        role: 'owner',
+      });
+
+      return space;
     });
-
-    return space;
   } catch (error) {
     console.error('Database query failed in createSpace:', error);
     throw new Error('Failed to create space.', { cause: error });
@@ -204,63 +213,65 @@ export async function addSpaceMember(
   }
 
   try {
-    const actorMembership = await getMembership(actorId, spaceId);
-    if (!actorMembership) {
-      throw new Error('FORBIDDEN');
-    }
-    if (actorMembership.role !== 'owner' && actorMembership.role !== 'admin') {
-      throw new Error('FORBIDDEN_ROLE');
-    }
+    return await db.transaction(async (tx) => {
+      const actorMembership = await getMembership(actorId, spaceId, tx);
+      if (!actorMembership) {
+        throw new Error('FORBIDDEN');
+      }
+      if (actorMembership.role !== 'owner' && actorMembership.role !== 'admin') {
+        throw new Error('FORBIDDEN_ROLE');
+      }
 
-    const [space] = await db.select().from(spaces).where(eq(spaces.id, spaceId)).limit(1);
-    if (!space) {
-      throw new Error('NOT_FOUND');
-    }
-    if (space.type === 'personal') {
-      throw new Error('PERSONAL_SPACE_PRIVATE');
-    }
+      const [space] = await tx.select().from(spaces).where(eq(spaces.id, spaceId)).limit(1);
+      if (!space) {
+        throw new Error('NOT_FOUND');
+      }
+      if (space.type === 'personal') {
+        throw new Error('PERSONAL_SPACE_PRIVATE');
+      }
 
-    const [targetUser] = await db
-      .select({
-        id: users.id,
-        displayName: users.displayName,
-        email: users.email,
-      })
-      .from(users)
-      .where(eq(users.email, email))
-      .limit(1);
+      const [targetUser] = await tx
+        .select({
+          id: users.id,
+          displayName: users.displayName,
+          email: users.email,
+        })
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1);
 
-    if (!targetUser) {
-      throw new Error('USER_NOT_FOUND');
-    }
+      if (!targetUser) {
+        throw new Error('USER_NOT_FOUND');
+      }
 
-    const existingMember = await getMembership(targetUser.id, spaceId);
-    if (existingMember) {
-      throw new Error('ALREADY_MEMBER');
-    }
+      const existingMember = await getMembership(targetUser.id, spaceId, tx);
+      if (existingMember) {
+        throw new Error('ALREADY_MEMBER');
+      }
 
-    const [membership] = await db
-      .insert(spaceMemberships)
-      .values({
-        spaceId,
+      const [membership] = await tx
+        .insert(spaceMemberships)
+        .values({
+          spaceId,
+          userId: targetUser.id,
+          role,
+        })
+        .returning();
+
+      await tx.insert(notifications).values({
         userId: targetUser.id,
-        role,
-      })
-      .returning();
+        message: `You were added to ${space.name} (${space.type} space) as ${role}.`,
+      });
 
-    await db.insert(notifications).values({
-      userId: targetUser.id,
-      message: `You were added to ${space.name} (${space.type} space) as ${role}.`,
+      return {
+        membershipId: membership.id,
+        userId: targetUser.id,
+        displayName: targetUser.displayName,
+        email: targetUser.email,
+        role: membership.role,
+        joinedAt: membership.joinedAt,
+      };
     });
-
-    return {
-      membershipId: membership.id,
-      userId: targetUser.id,
-      displayName: targetUser.displayName,
-      email: targetUser.email,
-      role: membership.role,
-      joinedAt: membership.joinedAt,
-    };
   } catch (error) {
     if (
       error instanceof Error &&
@@ -298,47 +309,62 @@ export async function updateSpaceMemberRole(
   }
 
   try {
-    const actorMembership = await getMembership(actorId, spaceId);
-    if (!actorMembership) throw new Error('FORBIDDEN');
-    if (actorMembership.role !== 'owner') {
-      throw new Error('FORBIDDEN_ROLE');
-    }
+    return await db.transaction(async (tx) => {
+      const [space] = await tx
+        .select()
+        .from(spaces)
+        .where(eq(spaces.id, spaceId))
+        .for('update')
+        .limit(1);
+      if (!space) throw new Error('NOT_FOUND');
 
-    const targetMembership = await getMembership(targetUserId, spaceId);
-    if (!targetMembership) throw new Error('NOT_FOUND');
-
-    if (targetMembership.role === 'owner' && role !== 'owner') {
-      const otherOwners = await db
-        .select({ id: spaceMemberships.id })
+      const lockedMembers = await tx
+        .select()
         .from(spaceMemberships)
+        .where(eq(spaceMemberships.spaceId, spaceId))
+        .orderBy(spaceMemberships.id)
+        .for('update');
+
+      const actorMembership = lockedMembers.find((m) => m.userId === actorId);
+      if (!actorMembership) throw new Error('FORBIDDEN');
+      if (actorMembership.role !== 'owner') {
+        throw new Error('FORBIDDEN_ROLE');
+      }
+      if (space.type === 'personal') {
+        throw new Error('PERSONAL_SPACE_PRIVATE');
+      }
+
+      const targetMembership = lockedMembers.find((m) => m.userId === targetUserId);
+      if (!targetMembership) throw new Error('NOT_FOUND');
+
+      if (targetMembership.role === 'owner' && role !== 'owner') {
+        const otherOwners = lockedMembers.filter(
+          (m) => m.role === 'owner' && m.userId !== targetUserId
+        );
+        if (otherOwners.length === 0) {
+          throw new Error('VALIDATION: A space must have at least one owner.');
+        }
+      }
+
+      const [updated] = await tx
+        .update(spaceMemberships)
+        .set({ role })
         .where(
           and(
             eq(spaceMemberships.spaceId, spaceId),
-            eq(spaceMemberships.role, 'owner'),
-            ne(spaceMemberships.userId, targetUserId)
+            eq(spaceMemberships.userId, targetUserId)
           )
-        );
-      if (otherOwners.length === 0) {
-        throw new Error('VALIDATION: A space must have at least one owner.');
-      }
-    }
-
-    const [updated] = await db
-      .update(spaceMemberships)
-      .set({ role })
-      .where(
-        and(
-          eq(spaceMemberships.spaceId, spaceId),
-          eq(spaceMemberships.userId, targetUserId)
         )
-      )
-      .returning();
+        .returning();
 
-    return updated;
+      return updated;
+    });
   } catch (error) {
     if (
       error instanceof Error &&
-      (['NOT_FOUND', 'FORBIDDEN', 'FORBIDDEN_ROLE'].includes(error.message) ||
+      (['NOT_FOUND', 'FORBIDDEN', 'FORBIDDEN_ROLE', 'PERSONAL_SPACE_PRIVATE'].includes(
+        error.message
+      ) ||
         error.message.startsWith('VALIDATION:'))
     ) {
       throw error;
@@ -358,49 +384,110 @@ export async function removeSpaceMember(
   }
 
   try {
-    const [space] = await db.select().from(spaces).where(eq(spaces.id, spaceId)).limit(1);
-    if (!space) throw new Error('NOT_FOUND');
-    if (space.type === 'personal') {
-      throw new Error('PERSONAL_SPACE_PRIVATE');
-    }
+    return await db.transaction(async (tx) => {
+      const [space] = await tx
+        .select()
+        .from(spaces)
+        .where(eq(spaces.id, spaceId))
+        .for('update')
+        .limit(1);
+      if (!space) throw new Error('NOT_FOUND');
 
-    const actorMembership = await getMembership(actorId, spaceId);
-    if (!actorMembership) throw new Error('FORBIDDEN');
-
-    const isSelf = actorId === targetUserId;
-    if (!isSelf && actorMembership.role !== 'owner' && actorMembership.role !== 'admin') {
-      throw new Error('FORBIDDEN_ROLE');
-    }
-
-    const targetMembership = await getMembership(targetUserId, spaceId);
-    if (!targetMembership) throw new Error('NOT_FOUND');
-
-    if (targetMembership.role === 'owner') {
-      const otherOwners = await db
-        .select({ id: spaceMemberships.id })
+      const lockedMembers = await tx
+        .select()
         .from(spaceMemberships)
+        .where(eq(spaceMemberships.spaceId, spaceId))
+        .orderBy(spaceMemberships.id)
+        .for('update');
+
+      const actorMembership = lockedMembers.find((m) => m.userId === actorId);
+      if (!actorMembership) throw new Error('FORBIDDEN');
+
+      if (space.type === 'personal') {
+        throw new Error('PERSONAL_SPACE_PRIVATE');
+      }
+
+      const isSelf = actorId === targetUserId;
+      if (!isSelf && actorMembership.role !== 'owner' && actorMembership.role !== 'admin') {
+        throw new Error('FORBIDDEN_ROLE');
+      }
+
+      const targetMembership = lockedMembers.find((m) => m.userId === targetUserId);
+      if (!targetMembership) throw new Error('NOT_FOUND');
+
+      if (
+        !isSelf &&
+        actorMembership.role === 'admin' &&
+        targetMembership.role !== 'member'
+      ) {
+        throw new Error('FORBIDDEN_ROLE');
+      }
+
+      if (targetMembership.role === 'owner') {
+        const otherOwners = lockedMembers.filter(
+          (m) => m.role === 'owner' && m.userId !== targetUserId
+        );
+        if (otherOwners.length === 0) {
+          throw new Error('VALIDATION: Cannot remove the sole owner of a space.');
+        }
+      }
+
+      // Clear Matter ownership within this space while preserving historical creator & timeline records
+      const unassignedMatters = await tx
+        .update(matters)
+        .set({ ownerId: null, updatedAt: new Date() })
+        .where(and(eq(matters.spaceId, spaceId), eq(matters.ownerId, targetUserId)))
+        .returning({ id: matters.id });
+
+      if (unassignedMatters.length > 0) {
+        await tx.insert(matterUpdates).values(
+          unassignedMatters.map((m) => ({
+            matterId: m.id,
+            authorId: actorId,
+            updateType: 'assignment',
+            message: 'Ownership unassigned after member removal from space.',
+          }))
+        );
+      }
+
+      // Remove Matter participant associations for this user within the space
+      const spaceMatterIdsQuery = tx
+        .select({ id: matters.id })
+        .from(matters)
+        .where(eq(matters.spaceId, spaceId));
+
+      await tx
+        .delete(matterParticipants)
+        .where(
+          and(
+            eq(matterParticipants.userId, targetUserId),
+            inArray(matterParticipants.matterId, spaceMatterIdsQuery)
+          )
+        );
+
+      // Clean up obsolete unread notifications for this user scoped to Matters in this space
+      await tx
+        .delete(notifications)
+        .where(
+          and(
+            eq(notifications.userId, targetUserId),
+            isNull(notifications.readAt),
+            inArray(notifications.matterId, spaceMatterIdsQuery)
+          )
+        );
+
+      // Remove space membership
+      await tx
+        .delete(spaceMemberships)
         .where(
           and(
             eq(spaceMemberships.spaceId, spaceId),
-            eq(spaceMemberships.role, 'owner'),
-            ne(spaceMemberships.userId, targetUserId)
+            eq(spaceMemberships.userId, targetUserId)
           )
         );
-      if (otherOwners.length === 0) {
-        throw new Error('VALIDATION: Cannot remove the sole owner of a space.');
-      }
-    }
 
-    await db
-      .delete(spaceMemberships)
-      .where(
-        and(
-          eq(spaceMemberships.spaceId, spaceId),
-          eq(spaceMemberships.userId, targetUserId)
-        )
-      );
-
-    return { removed: true };
+      return { removed: true };
+    });
   } catch (error) {
     if (
       error instanceof Error &&

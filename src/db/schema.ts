@@ -1,5 +1,6 @@
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
+  check,
   index,
   pgTable,
   text,
@@ -29,7 +30,16 @@ export const spaces = pgTable(
       .notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index('idx_spaces_created_by').on(table.createdBy)]
+  (table) => [
+    index('idx_spaces_created_by').on(table.createdBy),
+    uniqueIndex('uq_spaces_personal_owner')
+      .on(table.createdBy)
+      .where(sql`${table.type} = 'personal'`),
+    check(
+      'chk_spaces_type',
+      sql`${table.type} IN ('personal', 'family', 'community')`
+    ),
+  ]
 );
 
 export const spaceMemberships = pgTable(
@@ -48,6 +58,10 @@ export const spaceMemberships = pgTable(
   (table) => [
     uniqueIndex('uq_space_memberships_space_user').on(table.spaceId, table.userId),
     index('idx_space_memberships_user_id').on(table.userId),
+    check(
+      'chk_space_memberships_role',
+      sql`${table.role} IN ('owner', 'admin', 'member')`
+    ),
   ]
 );
 
@@ -79,6 +93,14 @@ export const matters = pgTable(
     index('idx_matters_owner_id').on(table.ownerId),
     index('idx_matters_status').on(table.status),
     index('idx_matters_next_action_at').on(table.nextActionAt),
+    check(
+      'chk_matters_status',
+      sql`${table.status} IN ('Open', 'In Progress', 'Waiting', 'Completed', 'Archived')`
+    ),
+    check(
+      'chk_matters_priority',
+      sql`${table.priority} IN ('Low', 'Normal', 'High')`
+    ),
   ]
 );
 
@@ -133,6 +155,23 @@ export const notifications = pgTable(
   (table) => [
     index('idx_notifications_user_id').on(table.userId),
     index('idx_notifications_read_at').on(table.readAt),
+  ]
+);
+
+export const revokedSessions = pgTable(
+  'revoked_sessions',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    jti: text('jti').notNull().unique(),
+    userId: uuid('user_id')
+      .references(() => users.id, { onDelete: 'cascade' })
+      .notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('idx_revoked_sessions_expires_at').on(table.expiresAt),
+    index('idx_revoked_sessions_user_id').on(table.userId),
   ]
 );
 

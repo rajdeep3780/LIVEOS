@@ -1,10 +1,33 @@
 import crypto from 'node:crypto';
 
-const EPHEMERAL_FALLBACK_SECRET = crypto.randomBytes(32).toString('hex');
+export const MIN_SESSION_SECRET_LENGTH = 16;
+
+let devFallbackSecret: string | null = null;
+
+function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === 'production';
+}
+
+export function validateSessionSecretConfig(): string {
+  const configured = process.env.SESSION_SECRET?.trim();
+  if (configured && configured.length >= MIN_SESSION_SECRET_LENGTH) {
+    return configured;
+  }
+
+  if (isProductionEnv()) {
+    throw new Error(
+      `Missing or invalid SESSION_SECRET in production. Set SESSION_SECRET to a persistent secret of at least ${MIN_SESSION_SECRET_LENGTH} characters.`
+    );
+  }
+
+  if (!devFallbackSecret) {
+    devFallbackSecret = crypto.randomBytes(32).toString('hex');
+  }
+  return devFallbackSecret;
+}
 
 function getSessionSecret(): string {
-  const configured = process.env.SESSION_SECRET?.trim();
-  return configured && configured.length >= 16 ? configured : EPHEMERAL_FALLBACK_SECRET;
+  return validateSessionSecretConfig();
 }
 
 export function hashPassword(password: string): string {
@@ -24,14 +47,16 @@ export function verifyPassword(password: string, storedHash: string): boolean {
   return crypto.timingSafeEqual(derived, original);
 }
 
-interface SessionPayload {
+export interface SessionPayload {
   sub: string;
+  jti: string;
   exp: number;
 }
 
 export function signSessionToken(userId: string): string {
   const payload: SessionPayload = {
     sub: userId,
+    jti: crypto.randomUUID(),
     exp: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
   };
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -64,7 +89,13 @@ export function verifySessionToken(token: string): SessionPayload | null {
       Buffer.from(encodedPayload, 'base64url').toString('utf8')
     ) as SessionPayload;
 
-    if (!parsed.sub || typeof parsed.exp !== 'number' || parsed.exp < Date.now()) {
+    if (
+      !parsed.sub ||
+      typeof parsed.jti !== 'string' ||
+      parsed.jti.length === 0 ||
+      typeof parsed.exp !== 'number' ||
+      parsed.exp < Date.now()
+    ) {
       return null;
     }
     return parsed;

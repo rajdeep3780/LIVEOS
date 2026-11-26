@@ -1,4 +1,4 @@
-import type { NextFunction, Request, Response } from 'express';
+import type { CookieOptions, NextFunction, Request, Response } from 'express';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import { verifySessionToken } from '../lib/auth-crypto.ts';
 import {
@@ -6,6 +6,7 @@ import {
   type PublicUser,
   upsertFirebaseUser,
 } from '../services/userService.ts';
+import { isSessionRevoked } from '../services/sessionService.ts';
 
 export const SESSION_COOKIE_NAME = 'lifeos_session';
 
@@ -31,7 +32,7 @@ export function parseCookies(cookieHeader: string | undefined): Record<string, s
   return result;
 }
 
-function verifyCookieMutationOrigin(req: Request): boolean {
+export function verifyCookieMutationOrigin(req: Request): boolean {
   const method = req.method.toUpperCase();
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
     return true;
@@ -52,25 +53,56 @@ function verifyCookieMutationOrigin(req: Request): boolean {
   return false;
 }
 
-export function setSessionCookie(res: Response, token: string): void {
-  res.cookie(SESSION_COOKIE_NAME, token, {
+export function verifyLogoutCookieOrigin(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  const authHeader = req.headers.authorization;
+  const bearerToken =
+    authHeader && authHeader.startsWith('Bearer ')
+      ? authHeader.slice('Bearer '.length).trim()
+      : '';
+  const cookies = parseCookies(req.headers.cookie);
+  const cookieToken = cookies[SESSION_COOKIE_NAME];
+
+  if (cookieToken && !bearerToken && !verifyCookieMutationOrigin(req)) {
+    return res.status(403).json({ error: 'Forbidden: Cross-site request blocked.' });
+  }
+  return next();
+}
+
+export function isHttpsRequest(req: Request): boolean {
+  return Boolean(req.secure);
+}
+
+export function getSessionCookieOptions(req: Request): CookieOptions {
+  if (isHttpsRequest(req)) {
+    return {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      partitioned: true,
+      path: '/',
+    };
+  }
+  return {
     httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    partitioned: true,
+    secure: false,
+    sameSite: 'lax',
     path: '/',
+  };
+}
+
+export function setSessionCookie(req: Request, res: Response, token: string): void {
+  res.cookie(SESSION_COOKIE_NAME, token, {
+    ...getSessionCookieOptions(req),
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 }
 
-export function clearSessionCookie(res: Response): void {
-  res.clearCookie(SESSION_COOKIE_NAME, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    partitioned: true,
-    path: '/',
-  });
+export function clearSessionCookie(req: Request, res: Response): void {
+  res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions(req));
 }
 
 export const requireAuth = async (
@@ -86,6 +118,9 @@ export const requireAuth = async (
       // 1. Check custom HMAC session token
       const session = verifySessionToken(token);
       if (session) {
+        if (await isSessionRevoked(session.jti)) {
+          return res.status(401).json({ error: 'Unauthorized: Session has been revoked.' });
+        }
         const user = await getUserById(session.sub);
         if (user) {
           req.user = user;
@@ -94,18 +129,35 @@ export const requireAuth = async (
       }
 
       // 2. Otherwise verify Firebase ID token
+      let decoded;
       try {
-        const decoded = await adminAuth.verifyIdToken(token);
-        const email = decoded.email || `${decoded.uid}@firebase.local`;
+        decoded = await adminAuth.verifyIdToken(token);
+      } catch {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired token.' });
+      }
+
+      if (decoded.email_verified !== true || !decoded.email) {
+        return res.status(403).json({
+          error:
+            'Email verification is required. Please verify your email address before signing in.',
+        });
+      }
+
+      try {
         const user = await upsertFirebaseUser(
           decoded.uid,
-          email,
+          decoded.email,
           decoded.name || undefined
         );
         req.user = user;
         return next();
-      } catch {
-        return res.status(401).json({ error: 'Unauthorized: Invalid or expired token.' });
+      } catch (err) {
+        if (err instanceof Error && err.message === 'AUTH_UID_MISMATCH') {
+          return res.status(409).json({
+            error: 'This email address is already linked to a different account.',
+          });
+        }
+        throw err;
       }
     }
 
@@ -118,6 +170,10 @@ export const requireAuth = async (
       }
       const session = verifySessionToken(cookieToken);
       if (session) {
+        if (await isSessionRevoked(session.jti)) {
+          clearSessionCookie(req, res);
+          return res.status(401).json({ error: 'Unauthorized: Session has been revoked.' });
+        }
         const user = await getUserById(session.sub);
         if (user) {
           req.user = user;

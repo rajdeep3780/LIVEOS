@@ -20,6 +20,7 @@ import {
   SpaceTypeIndicator,
   StatusTag,
 } from '../../components/ui/StatusIndicators.tsx';
+import { useAuth } from '../../context/AuthContext.tsx';
 import { useAppLayout } from '../../layouts/AppLayout.tsx';
 import {
   formatDateTime,
@@ -52,6 +53,7 @@ const PRIORITY_OPTIONS: MatterPriority[] = ['Low', 'Normal', 'High'];
 export function MatterDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { triggerRefresh } = useAppLayout();
 
   const [matter, setMatter] = useState<MatterDetail | null>(null);
@@ -99,8 +101,8 @@ export function MatterDetailPage() {
       setPendingStatusPrompt('Waiting');
       return;
     }
-    if (newStatus === 'Completed' && !matter.resolution) {
-      setPromptInput('');
+    if (newStatus === 'Completed') {
+      setPromptInput(matter.resolution || '');
       setPendingStatusPrompt('Completed');
       return;
     }
@@ -254,6 +256,30 @@ export function MatterDetailPage() {
     );
   }
 
+  const isOwnerOrAdmin =
+    matter.currentUserRole === 'owner' || matter.currentUserRole === 'admin';
+  const isArchived = matter.status === 'Archived';
+  const isMatterOwnerOrCreator =
+    Boolean(user?.id) &&
+    (matter.ownerId === user?.id || matter.createdBy === user?.id);
+  const perms = matter.permissions ?? {
+    canEditDetails: isOwnerOrAdmin || (!isArchived && isMatterOwnerOrCreator),
+    canChangeStatusPriority:
+      isOwnerOrAdmin || (!isArchived && isMatterOwnerOrCreator),
+    canChangeOwnership: isOwnerOrAdmin,
+    canManageParticipants:
+      isOwnerOrAdmin || (!isArchived && isMatterOwnerOrCreator),
+    canArchiveRestore: isOwnerOrAdmin,
+    canDelete:
+      isOwnerOrAdmin ||
+      (!isArchived && Boolean(user?.id) && matter.createdBy === user?.id),
+    canPostUpdate: !isArchived,
+  };
+
+  const availableStatusOptions = perms.canArchiveRestore
+    ? STATUS_OPTIONS
+    : STATUS_OPTIONS.filter((s) => s !== 'Archived' || s === matter.status);
+
   const overdue =
     matter.status !== 'Completed' &&
     matter.status !== 'Archived' &&
@@ -272,33 +298,39 @@ export function MatterDetailPage() {
         </Link>
 
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setEditModalOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#2B2E38] bg-[#14161A] px-3 py-1.5 text-xs font-medium text-[#E5E7EB] transition-colors hover:border-[#3A3F4C] hover:text-white"
-          >
-            <Edit3 className="h-3.5 w-3.5" />
-            <span>Edit</span>
-          </button>
+          {perms.canEditDetails && (
+            <button
+              type="button"
+              onClick={() => setEditModalOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#2B2E38] bg-[#14161A] px-3 py-1.5 text-xs font-medium text-[#E5E7EB] transition-colors hover:border-[#3A3F4C] hover:text-white"
+            >
+              <Edit3 className="h-3.5 w-3.5" />
+              <span>Edit</span>
+            </button>
+          )}
 
-          <button
-            type="button"
-            onClick={handleArchiveToggle}
-            disabled={savingStatus}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#2B2E38] bg-[#14161A] px-3 py-1.5 text-xs font-medium text-[#E5E7EB] transition-colors hover:border-[#3A3F4C] hover:text-white"
-          >
-            <Archive className="h-3.5 w-3.5" />
-            <span>{matter.status === 'Archived' ? 'Restore' : 'Archive'}</span>
-          </button>
+          {perms.canArchiveRestore && (
+            <button
+              type="button"
+              onClick={handleArchiveToggle}
+              disabled={savingStatus}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#2B2E38] bg-[#14161A] px-3 py-1.5 text-xs font-medium text-[#E5E7EB] transition-colors hover:border-[#3A3F4C] hover:text-white"
+            >
+              <Archive className="h-3.5 w-3.5" />
+              <span>{matter.status === 'Archived' ? 'Restore' : 'Archive'}</span>
+            </button>
+          )}
 
-          <button
-            type="button"
-            onClick={() => setDeleteDialogOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#472225] bg-[#211315] px-3 py-1.5 text-xs font-medium text-[#FCA5A5] transition-colors hover:bg-[#2E181B]"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            <span>Delete</span>
-          </button>
+          {perms.canDelete && (
+            <button
+              type="button"
+              onClick={() => setDeleteDialogOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#472225] bg-[#211315] px-3 py-1.5 text-xs font-medium text-[#FCA5A5] transition-colors hover:bg-[#2E181B]"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              <span>Delete</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -330,13 +362,17 @@ export function MatterDetailPage() {
                 <select
                   aria-label="Matter status"
                   value={matter.status}
-                  disabled={savingStatus}
+                  disabled={
+                    savingStatus ||
+                    !perms.canChangeStatusPriority ||
+                    (matter.status === 'Archived' && !perms.canArchiveRestore)
+                  }
                   onChange={(e) =>
                     handleStatusChange(e.target.value as MatterStatus)
                   }
-                  className="rounded-md border border-[#2B2E38] bg-[#0F1114] px-2.5 py-1.5 text-xs font-medium text-white focus:border-[#F97316] focus:outline-none"
+                  className="rounded-md border border-[#2B2E38] bg-[#0F1114] px-2.5 py-1.5 text-xs font-medium text-white focus:border-[#F97316] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {STATUS_OPTIONS.map((s) => (
+                  {availableStatusOptions.map((s) => (
                     <option key={s} value={s}>
                       {s}
                     </option>
@@ -350,10 +386,11 @@ export function MatterDetailPage() {
                 <select
                   aria-label="Matter priority"
                   value={matter.priority}
+                  disabled={!perms.canChangeStatusPriority}
                   onChange={(e) =>
                     handlePriorityChange(e.target.value as MatterPriority)
                   }
-                  className="rounded-md border border-[#2B2E38] bg-[#0F1114] px-2.5 py-1.5 text-xs font-medium text-white focus:border-[#F97316] focus:outline-none"
+                  className="rounded-md border border-[#2B2E38] bg-[#0F1114] px-2.5 py-1.5 text-xs font-medium text-white focus:border-[#F97316] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {PRIORITY_OPTIONS.map((p) => (
                     <option key={p} value={p}>
@@ -488,35 +525,41 @@ export function MatterDetailPage() {
             </div>
 
             {/* Update Composer */}
-            <form
-              onSubmit={handlePostUpdate}
-              className="border-t border-[#23262E] bg-[#101216] p-5"
-            >
-              <label
-                htmlFor="matter-update-input"
-                className="mb-2 block text-xs font-medium text-[#CBD5E1]"
+            {perms.canPostUpdate ? (
+              <form
+                onSubmit={handlePostUpdate}
+                className="border-t border-[#23262E] bg-[#101216] p-5"
               >
-                Post Progress Update or Note
-              </label>
-              <textarea
-                id="matter-update-input"
-                rows={3}
-                value={updateMessage}
-                onChange={(e) => setUpdateMessage(e.target.value)}
-                placeholder="Log a phone call, vendor response, receipt note, or next step..."
-                className="w-full rounded-md border border-[#2B2E38] bg-[#0B0C0E] px-3.5 py-2.5 text-sm text-white placeholder-[#6B7280] focus:border-[#F97316] focus:outline-none"
-              />
-              <div className="mt-3 flex justify-end">
-                <button
-                  type="submit"
-                  disabled={postingUpdate || !updateMessage.trim()}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-[#F97316] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#EA580C] disabled:opacity-50"
+                <label
+                  htmlFor="matter-update-input"
+                  className="mb-2 block text-xs font-medium text-[#CBD5E1]"
                 >
-                  <Send className="h-3.5 w-3.5" />
-                  <span>{postingUpdate ? 'Posting...' : 'Add Update'}</span>
-                </button>
+                  Post Progress Update or Note
+                </label>
+                <textarea
+                  id="matter-update-input"
+                  rows={3}
+                  value={updateMessage}
+                  onChange={(e) => setUpdateMessage(e.target.value)}
+                  placeholder="Log a phone call, vendor response, receipt note, or next step..."
+                  className="w-full rounded-md border border-[#2B2E38] bg-[#0B0C0E] px-3.5 py-2.5 text-sm text-white placeholder-[#6B7280] focus:border-[#F97316] focus:outline-none"
+                />
+                <div className="mt-3 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={postingUpdate || !updateMessage.trim()}
+                    className="inline-flex items-center gap-1.5 rounded-md bg-[#F97316] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#EA580C] disabled:opacity-50"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                    <span>{postingUpdate ? 'Posting...' : 'Add Update'}</span>
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="border-t border-[#23262E] bg-[#101216] px-6 py-4 text-xs text-[#9CA3AF]">
+                This Matter is archived. Restore it to post new progress updates.
               </div>
-            </form>
+            )}
           </section>
         </div>
 
@@ -534,15 +577,22 @@ export function MatterDetailPage() {
               <select
                 id="detail-owner-select"
                 value={matter.ownerId || ''}
+                disabled={!perms.canChangeOwnership}
                 onChange={(e) => handleOwnerChange(e.target.value)}
-                className="w-full rounded-md border border-[#2B2E38] bg-[#0F1114] px-3 py-2 text-sm text-white focus:border-[#F97316] focus:outline-none"
+                className="w-full rounded-md border border-[#2B2E38] bg-[#0F1114] px-3 py-2 text-sm text-white focus:border-[#F97316] focus:outline-none disabled:cursor-not-allowed disabled:opacity-60"
               >
+                {!matter.ownerId && <option value="">Unassigned</option>}
                 {matter.spaceMembers.map((m) => (
                   <option key={m.userId} value={m.userId}>
                     {m.displayName} ({m.role})
                   </option>
                 ))}
               </select>
+              {!perms.canChangeOwnership && (
+                <p className="mt-1.5 text-[11px] text-[#6B7280]">
+                  Only Space Owners and Admins can reassign ownership.
+                </p>
+              )}
             </div>
 
             {/* Participants */}
@@ -567,8 +617,9 @@ export function MatterDetailPage() {
                       <button
                         key={m.userId}
                         type="button"
+                        disabled={!perms.canManageParticipants}
                         onClick={() => handleToggleParticipant(m.userId)}
-                        className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                        className={`flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
                           isParticipant
                             ? 'border-[#F97316]/60 bg-[#26180F] text-white'
                             : 'border-[#23262E] bg-[#101216] text-[#9CA3AF] hover:border-[#343842] hover:text-white'

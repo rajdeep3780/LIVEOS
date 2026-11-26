@@ -4,7 +4,8 @@ import * as dashboardController from '../controllers/dashboardController.ts';
 import * as matterController from '../controllers/matterController.ts';
 import * as notificationController from '../controllers/notificationController.ts';
 import * as spaceController from '../controllers/spaceController.ts';
-import { requireAuth } from '../middleware/auth.ts';
+import { requireAuth, verifyLogoutCookieOrigin } from '../middleware/auth.ts';
+import { loginRateLimiter, registerRateLimiter } from '../middleware/rateLimit.ts';
 
 const router = Router();
 
@@ -14,9 +15,9 @@ router.get('/health', (_req, res) => {
 });
 
 // Authentication
-router.post('/auth/register', authController.register);
-router.post('/auth/login', authController.login);
-router.post('/auth/logout', authController.logout);
+router.post('/auth/register', registerRateLimiter, authController.register);
+router.post('/auth/login', loginRateLimiter, authController.login);
+router.post('/auth/logout', verifyLogoutCookieOrigin, authController.logout);
 router.get('/auth/me', requireAuth, authController.me);
 router.patch('/auth/profile', requireAuth, authController.updateProfile);
 
